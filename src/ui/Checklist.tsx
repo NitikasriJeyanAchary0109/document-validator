@@ -40,6 +40,20 @@ export function Checklist({ service, items, added, onAdd }: Props) {
                     {item.status === 'have' && item.via ? `Covered by your ${docLabel(item.via).toLowerCase()}.` : `Accepted: ${item.accepted}.`}
                   </div>
                   {item.help && item.status === 'missing' && <div className="check-help">{item.help}</div>}
+                  {item.status === 'missing' && req && req.anyOf.some((a) => a.note) && (
+                    <details className="check-notes">
+                      <summary>Conditions on some of these</summary>
+                      <ul>
+                        {req.anyOf
+                          .filter((a) => a.note)
+                          .map((a) => (
+                            <li key={a.doc}>
+                              <strong>{docLabel(a.doc)}:</strong> {a.note}
+                            </li>
+                          ))}
+                      </ul>
+                    </details>
+                  )}
                 </div>
               </div>
               {item.status === 'missing' && req && (

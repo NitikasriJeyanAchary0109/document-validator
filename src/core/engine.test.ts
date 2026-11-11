@@ -340,3 +340,76 @@ describe('sources', () => {
     expect(unverified === undefined || unverified.sourceUrl === undefined).toBe(true)
   })
 })
+
+describe('Aadhaar update', () => {
+  const NAME_DOC = () => doc('passport', { name: 'Asha Sharma', dob: '15/06/2000', number: 'K1234567', expiryDate: '01/01/2031' })
+
+  it('asks which update first', () => {
+    expect(ids(run('aadhaar_update', { answers: {}, docs: [] }))).toContain('unanswered:update')
+  })
+  it('is ready for a name update with a passport', () => {
+    const r = run('aadhaar_update', { answers: { update: 'name' }, docs: [NAME_DOC()] })
+    expect(r.verdict).toBe('ready')
+  })
+  it('does not accept a PAN card as proof of identity (it is not on the UIDAI list)', () => {
+    const r = run('aadhaar_update', { answers: { update: 'name' }, docs: [doc('pan', { name: 'Asha Sharma', dob: '15/06/2000', number: 'ABCPK1234F' })] })
+    expect(ids(r)).toContain('missing:name_proof')
+  })
+  it('does not accept a driving licence as proof of address', () => {
+    const r = run('aadhaar_update', { answers: { update: 'address' }, docs: [doc('driving_licence', { name: 'Asha Sharma', dob: '15/06/2000', number: 'MH1420110012345' })] })
+    expect(ids(r)).toContain('missing:address_proof')
+  })
+  it('accepts a driving licence as proof of identity', () => {
+    const r = run('aadhaar_update', { answers: { update: 'name' }, docs: [doc('driving_licence', { name: 'Asha Sharma', dob: '15/06/2000', number: 'MH1420110012345', expiryDate: '01/01/2040' })] })
+    expect(ids(r)).not.toContain('missing:name_proof')
+  })
+  it('requires a birth certificate for a date-of-birth update under 18', () => {
+    const answers = { update: 'dob' }
+    const r = run('aadhaar_update', { dob: '15/06/2012', answers, docs: [doc('passport', { name: 'Asha Sharma', dob: '15/06/2012', number: 'K1234567', expiryDate: '01/01/2031' })] })
+    expect(ids(r)).toContain('missing:dob_proof_minor')
+    const ok = run('aadhaar_update', { dob: '15/06/2012', answers, docs: [doc('birth_certificate', { name: 'Asha Sharma', fatherName: 'Ramesh Sharma', dob: '15/06/2012' })] })
+    expect(ok.verdict).toBe('ready')
+  })
+  it('accepts several documents for a date-of-birth update from 18', () => {
+    const r = run('aadhaar_update', { answers: { update: 'dob' }, docs: [doc('school_certificate', { name: 'Asha Sharma', fatherName: 'Ramesh Sharma', dob: '15/06/2000' })] })
+    expect(ids(r)).not.toContain('missing:dob_proof_adult')
+  })
+  it('warns when a utility bill is older than three months, and not at the edge', () => {
+    const bill = (issueDate: string) => run('aadhaar_update', { answers: { update: 'address' }, docs: [doc('utility_bill', { name: 'Asha Sharma', address: ADDRESS, issueDate })] })
+    expect(has(bill('01/07/2026'), 'timing:bill_age')).toBe(true)
+    expect(has(bill('10/08/2026'), 'timing:bill_age')).toBe(false) // 92 days
+    expect(has(bill('08/08/2026'), 'timing:bill_age')).toBe(true) // 94 days
+  })
+  it('flags a name that differs between the documents submitted', () => {
+    const r = run('aadhaar_update', { answers: { update: 'dob' }, docs: [doc('birth_certificate', { name: 'Asha Sharma', fatherName: 'R Sharma', dob: '15/06/2000' }), doc('passport', { name: 'Meera Rao', dob: '15/06/2000', number: 'K1234567', expiryDate: '01/01/2031' })] })
+    expect(ids(r).some((i) => i.startsWith('name:'))).toBe(true)
+  })
+  it('is marked verified and every requirement cites the UIDAI document', () => {
+    const s = getService('aadhaar_update')!
+    expect(s.status).toBe('verified')
+    for (const req of s.requirements) expect(req.sourceUrl).toMatch(/^https:\/\/[^/]*uidai\.gov\.in\//)
+  })
+})
+
+describe('driving licence: duplicate, address or name change', () => {
+  const dl = () => doc('driving_licence', { name: 'Asha Sharma', dob: '15/06/2000', number: 'MH1420110012345' })
+
+  it('needs a police complaint for a duplicate', () => {
+    const r = run('licence_changes', { answers: { change: 'duplicate' }, docs: [dl()] })
+    expect(severityOf(r, 'missing:police_complaint')).toBe('blocker')
+    expect(run('licence_changes', { answers: { change: 'duplicate' }, docs: [dl(), tick('police_complaint')] }).verdict).toBe('ready')
+  })
+  it('needs address proof only for an address change', () => {
+    expect(ids(run('licence_changes', { answers: { change: 'address' }, docs: [dl()] }))).toContain('missing:address_proof')
+    expect(ids(run('licence_changes', { answers: { change: 'duplicate' }, docs: [dl(), tick('police_complaint')] }))).not.toContain('missing:address_proof')
+  })
+  it('lists the name-change papers as unverified, and is satisfied by any one', () => {
+    const missing = run('licence_changes', { answers: { change: 'name' }, docs: [dl()] })
+    expect(missing.issues.find((i) => i.id.startsWith('missing:name_papers'))?.provisional).toBe(true)
+    expect(ids(run('licence_changes', { answers: { change: 'name' }, docs: [dl(), tick('affidavit')] }))).not.toContain('missing:name_papers')
+  })
+  it('does not raise an expiry blocker for an expired licence it cannot judge', () => {
+    const expired = doc('driving_licence', { name: 'Asha Sharma', dob: '15/06/2000', number: 'MH1420110012345', expiryDate: '01/01/2025' })
+    expect(has(run('licence_changes', { answers: { change: 'duplicate' }, docs: [expired, tick('police_complaint')] }), 'expired:')).toBe(false)
+  })
+})

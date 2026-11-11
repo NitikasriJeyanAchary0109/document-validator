@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Photo reading accuracy (dev only)</title>
+    <style>body{font:14px system-ui;margin:24px;max-width:900px}pre{white-space:pre-wrap;background:#f4f4f4;padding:12px}</style>
+  </head>
+  <body>
+    <h1>Photo reading accuracy</h1>
+    <p>Dev only. Reads invented cards through the app's real pipeline. Not part of the production build.</p>
+    <button id="go">Run</button> <span id="status"></span>
+    <pre id="out"></pre>
+    <script type="module" src="/eval/run.ts"></script>
+  </body>
+</html>

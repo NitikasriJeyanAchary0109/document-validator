@@ -1,8 +1,8 @@
 # Ready for the counter
 
-A one-stop **pre-appointment document checker** for RTO and passport visits. You say what you are going in for, enter what your documents say, and it tells you what is missing or likely to cause trouble *before* you spend a morning in a queue.
+A one-stop **pre-appointment document checker** for RTO, passport and Aadhaar visits. You say what you are going in for, enter what your documents say, and it tells you what is missing or likely to cause trouble *before* you spend a morning in a queue.
 
-Runs entirely in the browser. There is no server: nothing you type is uploaded, stored or logged, and the production build ships a Content-Security-Policy that blocks all network requests.
+Runs entirely in the browser. There is no server: nothing you type or photograph is uploaded, stored or logged, and the production build ships a Content-Security-Policy that only lets the page talk to its own origin (no CDN, no third-party host).
 
 ## Run it
 
@@ -23,12 +23,25 @@ npm run build      # production build in dist/
 | Driving licence (after a learner's licence) | six-month validity checked; the 30-day wait is unverified |
 | Driving licence renewal | grace period and five-year limit from the Act; documents from Form 2; how early you may renew is unverified |
 | New vehicle registration | unverified (Central Rules and Vahan pages could not be read) |
+| Driving licence: duplicate, address or name change | documents checked against Form 2; which papers a name change needs is unverified |
 | Vehicle ownership transfer | document list unverified; time limits (14/45 days seller, 30 days buyer) from the Act |
+| Aadhaar update: name, address or date of birth | verified 11 Nov 2026 against the UIDAI acceptable-documents list (List IV) |
 | Passport: fresh (adult), re-issue, child under 18 | verified 10 Oct 2026 (carried over from the Passport Mitra rule files) |
 
 For every service it checks: required documents (with "any one of" groups and age or answer-dependent variants), age eligibility, number formats (Aadhaar checksum, PAN, passport, driving licence, vehicle registration, voter ID), expiry on the appointment date, timing windows, and consistency across documents (names, date of birth, address, father's name). Output: a verdict (Not ready yet / Almost ready / Looks ready), each issue as *what we found, why it matters, what to do*, and a "bring on the day" list.
 
 Wording rule: "commonly causes problems", never "will be rejected"; no promised outcomes or timelines.
+
+## Reading a document from a photo
+
+Each document card has **Read from a photo**. The photo is shrunk, greyed and contrast-stretched in a canvas (`src/ocr/prepare.ts`), read by Tesseract.js running in a web worker (`src/ocr/read.ts`), and the text is turned into fields by `src/core/extract.ts`. The user always sees the filled fields and confirms them; anything guessed by position, failing a format check (for example the Aadhaar checksum) or read with low confidence is marked "check this".
+
+- **Design follows the earlier extraction research** (`~/google-gdg-devfest-2026/docs/handoff-extraction.md`): classic on-device OCR plus rules, validators as a soft confidence signal (a failing checksum flags the field, it does not discard it), front of the document only, and no model that needs a server. NuExtract was not used: it needs a GPU and uploading photos, which this app never does.
+- **Everything is served from this site.** `npm run ocr:assets` (run automatically before `dev` and `build`) copies the engine, its WebAssembly core and the English language data from `node_modules` into `public/ocr` (about 10 MB, git-ignored, loaded only when someone reads a photo). Caching is off, so nothing persists in the browser.
+- **Dim photos get a second read.** If the first read looks poor (average confidence under 60), the photo is read again after correcting uneven or dim light, and the better read is kept (`readPhoto` in `src/ocr/read.ts`).
+- **Tilted photos are turned level first.** The tilt of the text lines is measured and the photo is turned back before reading (`src/ocr/deskew.ts`), which took 4 to 8 degree tilts from 57-69% to 93-94% right.
+- **Measured on invented cards only** (`docs/photo-accuracy.md`): about 81% of values right across eight kinds of damage, 99% on clean images, 70% on low-light ones (12% before the retry), 74% on blurred ones, with 0.1% wrong without a warning. These are simulated photos of invented layouts, so real-photo accuracy is still unknown. Re-run with `npm run dev` and open `/eval.html?run=1&people=6` (keep the tab in front). Real ID photos must never go in the repo (`samples/real/` is git-ignored).
+- English text only for now; Hindi lines on cards are ignored.
 
 ## How it is organised
 
@@ -56,7 +69,7 @@ Each requirement and window carries its own `provisional` flag. Policy: a rule m
 
 ## Not built yet
 
-- **Reading documents from photos** (on-device OCR with Tesseract.js, then the user confirms each field). The checker already takes the same fields a scan would produce, so OCR only has to fill them in. Notes on accuracy and speed are in `~/google-gdg-devfest-2026/docs/handoff-extraction.md`.
+- Better handling of blurred and noisy photos, a measured passport fix (use its machine-readable lines), and Hindi or other-script text.
 - State-specific rule variants; Hindi and other languages (UI strings are inline in the components for now and should move to message files first).
 - More services: driving licence duplicate or address change, RC renewal, PAN, Aadhaar update, voter ID, police clearance.
 - Checking the printed values against each other on one document (for example the year inside a driving licence number against its issue date).

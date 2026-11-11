@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { today, toIso } from './core/dates'
 import { checkDocuments, type ProvidedDoc } from './core/engine'
+import { extractFields } from './core/extract'
 import { getService } from './rules'
 import { DOCS } from './rules/documents'
 import type { DocTypeId, FieldKey } from './rules/types'
 import { Basics } from './ui/Basics'
 import { Checklist } from './ui/Checklist'
-import { DocCards } from './ui/DocCards'
+import { disposeOcr, readPhoto } from './ocr/read'
+import { DocCards, type ScanState } from './ui/DocCards'
 import { Result } from './ui/Result'
 import { ServicePicker } from './ui/ServicePicker'
 
@@ -20,6 +22,7 @@ export function App() {
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [docs, setDocs] = useState<ProvidedDoc[]>([])
   const [checked, setChecked] = useState(false)
+  const [scans, setScans] = useState<Record<string, ScanState | undefined>>({})
   const resultRef = useRef<HTMLDivElement>(null)
 
   const service = serviceId ? getService(serviceId) : undefined
@@ -39,6 +42,9 @@ export function App() {
     if (checked) resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [checked])
 
+  // Free the OCR engine's memory when the page goes away.
+  useEffect(() => () => void disposeOcr(), [])
+
   function pickService(id: string) {
     setServiceId(id)
     setAnswers({})
@@ -52,6 +58,7 @@ export function App() {
     setAsOf(toIso(today()))
     setAnswers({})
     setDocs([])
+    setScans({})
     setChecked(false)
     window.scrollTo({ top: 0 })
   }
@@ -63,7 +70,33 @@ export function App() {
     if (!tickOnly) setTimeout(() => document.getElementById(`${id}-${DOCS[type].fields[0]}`)?.focus(), 0)
   }
 
-  const setField = (id: string, field: FieldKey, value: string) => setDocs((ds) => ds.map((d) => (d.id === id ? { ...d, fields: { ...d.fields, [field]: value } } : d)))
+  const setField = (id: string, field: FieldKey, value: string) => {
+    setDocs((ds) => ds.map((d) => (d.id === id ? { ...d, fields: { ...d.fields, [field]: value } } : d)))
+    // Once the person has looked at a field and changed it, it no longer needs the "check this" mark.
+    setScans((s) => {
+      const cur = s[id]
+      return cur?.status === 'done' && cur.check.includes(field) ? { ...s, [id]: { ...cur, check: cur.check.filter((f) => f !== field) } } : s
+    })
+  }
+
+  async function scanDoc(id: string, file: File) {
+    const type = docs.find((d) => d.id === id)?.type
+    if (!type) return
+    setScans((s) => ({ ...s, [id]: { status: 'reading', progress: 0 } }))
+    try {
+      const lines = await readPhoto(file, (progress) => setScans((s) => (s[id]?.status === 'reading' ? { ...s, [id]: { status: 'reading', progress } } : s)))
+      const { fields, check } = extractFields(type, lines)
+      const found = Object.keys(fields).length
+      if (found === 0) {
+        setScans((s) => ({ ...s, [id]: { status: 'empty' } }))
+        return
+      }
+      setDocs((ds) => ds.map((d) => (d.id === id ? { ...d, fields: { ...d.fields, ...fields } } : d)))
+      setScans((s) => ({ ...s, [id]: { status: 'done', found, check } }))
+    } catch {
+      setScans((s) => ({ ...s, [id]: { status: 'error' } }))
+    }
+  }
 
   const missingBlockers = report?.checklist.filter((c) => c.status === 'missing' && c.severity === 'blocker').length ?? 0
 
@@ -86,7 +119,7 @@ export function App() {
           <>
             <div className="hero">
               <h1>Check your papers before the appointment</h1>
-              <p>For RTO and passport visits. Tell us what you are going in for, enter what your documents say, and we flag what commonly causes problems at the counter.</p>
+              <p>For RTO, passport and Aadhaar visits. Tell us what you are going in for, enter what your documents say, and we flag what commonly causes problems at the counter.</p>
             </div>
             <ServicePicker onPick={pickService} />
           </>
@@ -106,7 +139,7 @@ export function App() {
 
             <Basics service={service} dob={dob} asOf={asOf} answers={answers} onDob={setDob} onAsOf={setAsOf} onAnswer={(id, v) => setAnswers((a) => ({ ...a, [id]: v }))} />
             <Checklist service={service} items={report.checklist} added={added} onAdd={addDoc} />
-            <DocCards docs={docs} addable={addable} onAdd={addDoc} onRemove={(id) => setDocs((ds) => ds.filter((d) => d.id !== id))} onField={setField} />
+            <DocCards docs={docs} addable={addable} onAdd={addDoc} onRemove={(id) => setDocs((ds) => ds.filter((d) => d.id !== id))} onField={setField} onScan={scanDoc} scans={scans} />
 
             <div ref={resultRef} className="result-anchor">
               {checked ? (

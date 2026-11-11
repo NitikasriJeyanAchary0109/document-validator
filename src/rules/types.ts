@@ -21,6 +21,19 @@ export type DocTypeId =
   | 'rent_agreement'
   | 'bank_passbook'
   | 'employer_letter'
+  | 'bank_statement'
+  | 'property_tax'
+  | 'life_insurance'
+  // other identity documents on the UIDAI list
+  | 'ration_card'
+  | 'service_id'
+  | 'pension_id'
+  | 'kisan_passbook'
+  | 'health_card'
+  | 'mgnrega_card'
+  | 'marriage_certificate'
+  | 'caste_certificate'
+  | 'gazette_notification'
   // vehicle papers
   | 'rc'
   | 'insurance'
@@ -45,6 +58,9 @@ export type DocTypeId =
   | 'annexure_d'
   | 'annexure_f'
   | 'police_report'
+  | 'police_complaint'
+  | 'affidavit'
+  | 'newspaper_ad'
   | 'parent_passport'
 
 export interface Condition {
@@ -136,7 +152,7 @@ export interface DateWindow {
   sourceUrl?: string
 }
 
-export type ServiceCategory = 'rto' | 'passport'
+export type ServiceCategory = 'rto' | 'passport' | 'aadhaar'
 
 export interface Service {
   id: string

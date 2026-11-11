@@ -5,3 +5,5 @@ dist
 *.log
 # Never commit real ID photos or scans
 samples/real/
+# Copied from node_modules by scripts/copy-ocr-assets.mjs
+public/ocr/
