@@ -16,11 +16,13 @@
     "prebuild": "npm run ocr:assets"
   },
   "dependencies": {
+    "onnxruntime-web": "^1.31.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tesseract.js": "^6.0.1"
   },
   "devDependencies": {
+    "@gutenye/ocr-models": "^1.4.2",
     "@tesseract.js-data/eng": "^1.0.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

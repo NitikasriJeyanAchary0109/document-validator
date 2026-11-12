@@ -128,4 +128,11 @@ describe('what the photo test found on clean images', () => {
     const both = extractFields('passport', 'Surname\nKHAN\nGiven Name(s)\nVIKRAM')
     expect(both.check).not.toContain('name')
   })
+  it('marks a date with a one-digit day or month, where a digit was probably lost', () => {
+    const lost = extractFields('aadhaar', 'DOB: A 5/03/ 1980')
+    expect(lost.fields.dob).toBe('05/03/1980')
+    expect(lost.check).toContain('dob')
+    expect(extractFields('aadhaar', 'DOB: 15/03/1980').check).not.toContain('dob')
+    expect(extractFields('aadhaar', 'DOB: 15/3/1980').check).toContain('dob')
+  })
 })

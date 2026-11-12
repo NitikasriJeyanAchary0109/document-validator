@@ -35,11 +35,13 @@ const fixLetters = (s: string) => s.replace(/[0158]/g, (c) => LETTER_FIX[c] ?? c
 
 const DATE_RE = /([0-9OoIl|]{1,2})\s*[/\-.]\s*([0-9OoIl|]{1,2})\s*[/\-.]\s*([0-9OoIl|]{4})/g
 
-function datesIn(text: string): string[] {
-  const out: string[] = []
+/** Dates found in the text. Cards print day and month as two digits, so a one-digit day or month usually means a digit
+ *  was lost in the photo ("A 5/03/1980" for "15/03/1980"); such a date is returned but marked unsure. */
+function datesIn(text: string): { value: string; unsure: boolean }[] {
+  const out: { value: string; unsure: boolean }[] = []
   for (const m of text.matchAll(DATE_RE)) {
     const p = parseFullDate(`${fixDigits(m[1]!)}/${fixDigits(m[2]!)}/${fixDigits(m[3]!)}`)
-    if (p) out.push(formatDate(p))
+    if (p) out.push({ value: formatDate(p), unsure: m[1]!.length < 2 || m[2]!.length < 2 })
   }
   return out
 }
@@ -49,6 +51,8 @@ function datesIn(text: string): string[] {
 interface Hit {
   value: string
   conf: number
+  /** The value was found but should be checked by the person whatever the confidence. */
+  unsure?: boolean
 }
 
 /** The text after a label, on the same line or, if the label stands alone, on the next line. */
@@ -78,10 +82,10 @@ function dateAfter(lines: OcrLine[], label: RegExp): Hit | null {
     const m = re.exec(t)
     if (!m) continue
     const same = datesIn(t.slice(m.index + m[0].length))
-    if (same[0]) return { value: same[0], conf: lines[i]!.conf }
+    if (same[0]) return { value: same[0].value, conf: lines[i]!.conf, unsure: same[0].unsure }
     const next = lines[i + 1]
     const nd = next ? datesIn(next.text) : []
-    if (next && nd[0]) return { value: nd[0], conf: next.conf }
+    if (next && nd[0]) return { value: nd[0].value, conf: next.conf, unsure: nd[0].unsure }
   }
   return null
 }
@@ -197,7 +201,7 @@ export function extractFields(type: DocTypeId, input: string | OcrLine[]): Extra
   const put = (f: FieldKey, hit: Hit | null, unsure = false) => {
     if (!hit || fields[f]) return
     fields[f] = hit.value
-    if (unsure || hit.conf < tuning.lowConf) check.add(f)
+    if (unsure || hit.unsure || hit.conf < tuning.lowConf) check.add(f)
   }
 
   for (const f of def.fields) {

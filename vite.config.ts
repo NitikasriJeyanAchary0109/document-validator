@@ -11,6 +11,15 @@ export default defineConfig({
   plugins: [
     react(),
     {
+      // ONNX Runtime names its WebAssembly file in its own code, so the bundler copies it into assets/. The app loads its
+      // copy from ocr/ (see src/ocr/paddle.ts), so the second copy is dead weight.
+      name: 'drop-duplicate-ort-wasm',
+      apply: 'build',
+      generateBundle(_, bundle) {
+        for (const name of Object.keys(bundle)) if (/assets\/ort-wasm.*\.wasm$/.test(name)) delete bundle[name]
+      },
+    },
+    {
       name: 'no-network-csp',
       apply: 'build',
       transformIndexHtml: (html) => html.replace('</head>', `    <meta http-equiv="Content-Security-Policy" content="${CSP}" />\n  </head>`),

@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { today, toIso } from './core/dates'
 import { checkDocuments, type ProvidedDoc } from './core/engine'
-import { extractFields } from './core/extract'
 import { getService } from './rules'
 import { DOCS } from './rules/documents'
 import type { DocTypeId, FieldKey } from './rules/types'
 import { Basics } from './ui/Basics'
 import { Checklist } from './ui/Checklist'
-import { disposeOcr, readPhoto } from './ocr/read'
+import { disposeOcr, readFields } from './ocr/read'
 import { DocCards, type ScanState } from './ui/DocCards'
 import { Result } from './ui/Result'
 import { ServicePicker } from './ui/ServicePicker'
@@ -84,8 +83,7 @@ export function App() {
     if (!type) return
     setScans((s) => ({ ...s, [id]: { status: 'reading', progress: 0 } }))
     try {
-      const lines = await readPhoto(file, (progress) => setScans((s) => (s[id]?.status === 'reading' ? { ...s, [id]: { status: 'reading', progress } } : s)))
-      const { fields, check } = extractFields(type, lines)
+      const { fields, check } = await readFields(type, file, (progress) => setScans((s) => (s[id]?.status === 'reading' ? { ...s, [id]: { status: 'reading', progress } } : s)))
       const found = Object.keys(fields).length
       if (found === 0) {
         setScans((s) => ({ ...s, [id]: { status: 'empty' } }))
