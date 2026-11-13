@@ -1,20 +1,19 @@
 import { useState } from 'react'
 import type { Issue, Report, Verdict } from '../core/engine'
-import type { Service, Severity } from '../rules/types'
+import type { Service } from '../rules/types'
 import { summaryText } from './summary'
 
 const VERDICT: Record<Verdict, { title: string; sub: string; icon: string }> = {
-  not_ready: { title: 'Not ready yet', sub: 'Some things commonly cause problems at the counter. Sort these out before you book or go.', icon: '✕' },
-  almost_ready: { title: 'Almost ready', sub: 'Nothing is missing outright, but a few things are worth checking first.', icon: '!' },
-  ready: { title: 'Looks ready', sub: 'Based on what you entered, nothing stands out. The office still decides.', icon: '✓' },
+  not_ready: { title: 'Not ready yet', sub: 'Sort these out before you book or go.', icon: '✕' },
+  almost_ready: { title: 'Almost ready', sub: 'A few things are worth checking first.', icon: '!' },
+  ready: { title: 'Looks ready', sub: 'Nothing stands out. The office still decides.', icon: '✓' },
 }
-
-const SEVERITY_LABEL: Record<Severity, string> = { blocker: 'Fix before you go', warning: 'Worth checking', info: 'For information' }
 
 export function Result({ service, report }: { service: Service; report: Report }) {
   const [copied, setCopied] = useState(false)
   const v = VERDICT[report.verdict]
-  const counts = (['blocker', 'warning', 'info'] as Severity[]).map((s) => ({ s, n: report.issues.filter((i) => i.severity === s).length }))
+  const todo = report.issues.filter((i) => i.severity !== 'info')
+  const info = report.issues.filter((i) => i.severity === 'info')
 
   async function copy() {
     try {
@@ -35,46 +34,31 @@ export function Result({ service, report }: { service: Service; report: Report }
         <div>
           <h2 id="result-h">{v.title}</h2>
           <p>{v.sub}</p>
-          <p className="verdict-meta">
-            {service.title} · checked for {report.asOf}
-            {report.age !== null && ` · age ${report.age} on that day`}
-          </p>
         </div>
       </div>
 
       {service.status === 'provisional' && (
-        <div className="banner banner-warn">
-          <strong>Some of these rules are not yet verified.</strong> Items marked unverified could not be confirmed on a government site, so use this to prepare, then confirm the list on{' '}
+        <p className="banner">
+          Some rules here are still unverified. Confirm the list on{' '}
           <a href={service.officialUrl} target="_blank" rel="noreferrer noopener">
             the official page
           </a>{' '}
           or with your RTO.
-        </div>
+        </p>
       )}
 
-      <div className="actions no-print">
-        <button type="button" className="btn" onClick={copy}>
-          {copied ? 'Copied' : 'Copy checklist'}
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={() => window.print()}>
-          Print
-        </button>
-      </div>
+      {todo.length > 0 && (
+        <>
+          <h3 className="block-h">To sort out</h3>
+          <ul className="issues" role="list">
+            {todo.map((i) => (
+              <IssueCard key={i.id} issue={i} />
+            ))}
+          </ul>
+        </>
+      )}
 
-      <h3 className="sec-h">
-        What to fix{' '}
-        <span className="count">
-          {counts.map((c) => (c.n ? `${c.n} ${c.s === 'blocker' ? 'to fix' : c.s === 'warning' ? 'to check' : 'to note'}` : null)).filter(Boolean).join(' · ') || 'nothing found'}
-        </span>
-      </h3>
-      {report.issues.length === 0 && <p className="empty">No problems found with what you entered.</p>}
-      <ul className="issues" role="list">
-        {report.issues.map((i) => (
-          <IssueCard key={i.id} issue={i} />
-        ))}
-      </ul>
-
-      <h3 className="sec-h">Bring on the day</h3>
+      <h3 className="block-h">Bring on the day</h3>
       <ul className="bring" role="list">
         {report.checklist.map((c) => (
           <li key={c.id} className={c.status === 'have' ? 'have' : 'missing'}>
@@ -89,50 +73,74 @@ export function Result({ service, report }: { service: Service; report: Report }
         ))}
       </ul>
 
-      <details className="notes">
-        <summary>What this check does not cover</summary>
-        <ul>
-          {report.notes.map((n) => (
-            <li key={n}>{n}</li>
-          ))}
-          <li>
-            Source: {service.sourceNote}{' '}
-            <a href={service.officialUrl} target="_blank" rel="noreferrer noopener">
-              Official page
-            </a>
-            . Rules last collected {service.retrieved}.
-          </li>
-        </ul>
-      </details>
+      <div className="actions no-print">
+        <button type="button" className="btn btn-ghost" onClick={copy}>
+          {copied ? 'Copied' : 'Copy checklist'}
+        </button>
+        <button type="button" className="btn btn-ghost" onClick={() => window.print()}>
+          Print
+        </button>
+      </div>
+
+      {(info.length > 0 || report.notes.length > 0) && (
+        <details className="more more-end">
+          <summary>
+            Good to know{info.length > 0 ? ` (${info.length})` : ''}
+          </summary>
+          {info.length > 0 && (
+            <ul className="issues" role="list">
+              {info.map((i) => (
+                <IssueCard key={i.id} issue={i} />
+              ))}
+            </ul>
+          )}
+          <ul className="notes-list">
+            {report.notes.map((n) => (
+              <li key={n}>{n}</li>
+            ))}
+            <li>
+              Source: {service.sourceNote}{' '}
+              <a href={service.officialUrl} target="_blank" rel="noreferrer noopener">
+                Official page
+              </a>
+              . Rules last collected {service.retrieved}.
+            </li>
+          </ul>
+        </details>
+      )}
     </section>
   )
 }
 
+/** What to do comes first; what was found, why, and the source are one tap away. */
 function IssueCard({ issue }: { issue: Issue }) {
   return (
     <li className={`issue issue-${issue.severity}`}>
-      <div className="issue-top">
-        <span className={`sev sev-${issue.severity}`}>{SEVERITY_LABEL[issue.severity]}</span>
-        {issue.provisional && <span className="tag tag-warn">unverified rule</span>}
-      </div>
-      <h4>{issue.title}</h4>
-      <dl>
-        <dt>What we found</dt>
-        <dd>{issue.found}</dd>
-        <dt>Why it matters</dt>
-        <dd>{issue.why}</dd>
-        <dt>What to do</dt>
-        <dd>{issue.fix}</dd>
-      </dl>
-      {issue.provisional ? (
-        <p className="src">Source not yet confirmed on a government site.</p>
-      ) : (
-        issue.sourceUrl && (
-          <a className="src" href={issue.sourceUrl} target="_blank" rel="noreferrer noopener">
-            Source: official government page
-          </a>
-        )
-      )}
+      <h4>
+        {issue.title}
+        {issue.provisional && <span className="soft"> · unverified</span>}
+      </h4>
+      <p className="issue-fix">{issue.fix}</p>
+      <details className="more">
+        <summary>Why</summary>
+        <p>
+          <strong>Found:</strong> {issue.found}
+        </p>
+        <p>
+          <strong>Why it matters:</strong> {issue.why}
+        </p>
+        {issue.provisional ? (
+          <p className="soft">Source not yet confirmed on a government site.</p>
+        ) : (
+          issue.sourceUrl && (
+            <p>
+              <a href={issue.sourceUrl} target="_blank" rel="noreferrer noopener">
+                Source: official government page
+              </a>
+            </p>
+          )
+        )}
+      </details>
     </li>
   )
 }

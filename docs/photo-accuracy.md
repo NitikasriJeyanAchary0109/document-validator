@@ -156,10 +156,107 @@ By set: people 1 to 4 (the word-spacing rule below was tuned on people 1 and 2):
 
 **Caveats.** All cards are invented, drawn with clean fonts: PaddleOCR may do better on those than on real printed cards, and real-photo accuracy is still unknown. The models are PP-OCRv4 multilingual (Chinese and English); Hindi text is read as the nearest letters and is ignored by the extractor. The word-gap thresholds were tuned on a few invented layouts and may need re-tuning on real cards.
 
+## Passport machine-readable lines (sixth round)
+
+The two lines of capitals and "<" at the bottom of a passport (ICAO 9303) carry check digits for the passport number, the birth date and the expiry date, so a value that passes is far more trustworthy than the same value read from the printed text. `src/core/mrz.ts` finds the lines in the OCR text (anchored on the nationality "IND" in line 2), reads the number, dates and names, and checks them; `extractFields` uses it for passports. The check digit routine reproduces the published ICAO specimen values (L898902C3 gives 6, 740812 gives 2, 120415 gives 9), and it is tested.
+
+**The test cards had a fake MRZ, so this round first gave them a real one** (`passportMrz` in `src/core/testkit.ts`, used by `eval/synth.ts`). The passport numbers in the earlier rounds were therefore scored against cards whose second line could never validate.
+
+| 80 invented passports, 8 conditions, both readers | right | silent wrong | missed |
+|---|---|---|---|
+| Without the lines | 79.1% | 0.0% | 11.9% |
+| **With the lines** | **84.7%** | **0.0%** | **5.9%** |
+
+The 32 passports of people 7 to 10 were not used while building it: 78.1% to 82.0%, silent errors unchanged. Dates and numbers gain most (birth date 87.5% to 93.8%, expiry 91.7% to 97.9% on the first 48). The 288-photo table above is now 95.1% right with 0.0% silent errors (those passports still carry the old fake lines, so they gain only from the name changes below and the rule that a value only the cross-check reader found is always marked).
+
+**What was tried and removed.** A first version repaired one misread character in the number or a date by searching look-alike characters until the check digit passed. It raised silent errors (8.3% of numbers on Tesseract-only reads): a check digit has only ten values, so the search accepted a wrong value about one time in ten. Now only the plain letter-for-digit swaps (O for 0 and so on) are made, and the check digit must pass as it is.
+
+**How much it is trusted.** A value that passes its own check digit replaces the printed one. It carries no "check this" mark only if the printed text agrees with it or the composite check digit over the whole of line 2 also passes (the empty personal-number field counts as filler, since photos misread it). Otherwise it is shown and marked. Names have no check digit: they only replace the printed name when they agree with it (which also settles spacing), complete a name whose surname line was missed (marked), or fill in a name that was not read (marked). Filler that a photo turned into letters ("CCS", "KKK") is dropped from the names.
+
+**Still weak:** passport names (about 54%, mostly marked): on blurred, sheared or noisy photos the surname line is often lost and the MRZ name line with it. Low-light passports are about 58%. The lines themselves are read at small size, so a very blurred photo loses them too. As everywhere, these are invented cards, and a real passport's MRZ font, spacing and glare will differ.
+
+## Fewer "check this" marks (seventh round)
+
+With two readers, 18% of the right values were still marked for checking. A mark that is almost never right costs the person time and teaches them to ignore marks. A breakdown of 320 readings showed where they came from: about 140 of the 198 marked right values were three fields that are *always* marked because they are found by position or pattern rather than by a label: the Aadhaar front name (the line above the date of birth), the Aadhaar back address and the driving licence address. Only 2 to 4 of each were actually wrong. By contrast, a marked passport name is wrong 62% of the time, and the other marks catch between 0 and 20%.
+
+**What changed** (`src/core/extract.ts`, `src/core/combine.ts`): every mark now records why it was raised (`Mark`): `format` (failed a format check, or junk was cleaned off), `confidence` (the line was read with low confidence), or `position` (found by position, not by a label); several reasons collapse to the first listed. When both readers find the same value, a mark that only says "found by position" is cleared, because two independent readers finding the same thing is evidence the position guess was right. A `format` mark or a `confidence` mark is never cleared by agreement.
+- **Addresses** are compared by their numbers (house number, PIN code: every token with a digit must be identical) and approximately by the other words (85% shared), since one reader often picks up junk from neighbouring lines. For addresses a low-confidence mark is also cleared on agreement.
+- **A spacing difference is not agreement.** When the readers produce the same letters with different spacing in a name, the mark stays if either reader was unsure.
+
+| marked right values, as a share of right values | before | after |
+|---|---|---|
+| People 1 to 4 and passports 1 to 6 (208 images) | 19.2% | **10.4%** |
+| Held out: people 5 and 6, passports 7 to 10 (112 images) | 17.2% | **8.6%** |
+
+Silent errors stay at 0 in both sets, and every error that was marked before is still marked (wrong-but-marked: 24 and 15, unchanged).
+
+**Two clearing rules were tried and rejected on the evidence.** Clearing `confidence` marks on agreement for names created a silent error: a very dark Aadhaar card where both readers returned "PRIYA DEVIPATEL" (true "PRIYA DEVI PATEL"), one with a line confidence of 0. Agreement of two weak reads is not confirmation, and both readers can merge a space the same way. The spacing-difference case also produced that error until the mark was kept for it. Clearing `format` marks saved only three more and was not worth the risk.
+
+**Caveat.** This depends on the readers being independent. A systematic error shared by both readers (a layout where the line above the date of birth is not the name) would now pass unmarked on those fields. That is checked here only on invented layouts. On real cards, watch Aadhaar name and address first.
+
+## Passport names (eighth round)
+
+Passport names were the weakest field (54% right on 80 passports, mostly wrong-but-marked). Reading what the two readers actually returned showed three separate causes, none of them the model:
+1. **The "Surname" label is misread** ("Sumame", "Suname", "Sumtame", "Curname"), so the surname value was never attached and the name came out as the given name only. Label words are now matched by edit distance, and "Given Name(s)" likewise ("Civen Namel", "Given Narme(s)"; a "Name(s)" word after "Given" is skipped). If a label cannot be found at all, the plain line above the given-names label is the surname, and the plain line below the surname is the given names; these are marked as found by position (`passportParts` in `src/core/extract.ts`).
+2. **Given names run together** under blur and noise ("PRIYADEVI", "GURPREETKUMARI"), the same space problem as before. The machine-readable name line carries the spacing as "<" separators, so it is now read more tolerantly (a first line that is short, "P<TND", or has "<-" for the double filler; `src/core/mrz.ts`) and lined up against the printed surname to find where the surname ends and the given names begin. When its letters agree with the printed name, its spacing is used.
+3. **Both lines come from the same recogniser, which merges words the same way on both**, so "agreement" there proves nothing. A name word of 10 or more letters (probably two words run together) or with a dot inside ("AR.JUN") is therefore marked whatever else agrees, for every document, not only passports (`suspectWord`). Cost: genuinely long single names (RAMACHANDRAN, SUBRAMANIAN) are now marked too; the invented names here have none of that length, so the cost on real names is not measured.
+
+| Passport names (invented, both readers) | right | silent wrong |
+|---|---|---|
+| Before (80 passports) | 54% | 0 |
+| **Passports 1 to 6 (48)** | **96%** | **0** |
+| **Held-out passports 7 to 10 (32, not used while building it)** | **81%** | **0** |
+
+All passport fields over the 80: 93.8% right (was 84.7%), 0.0% silent errors; names 90.0%, numbers 100%, dates 92.5%. Everything else is unchanged: set 1 98.9% right, held-out 97.4%, with 0 silent errors; the share of right values marked stays at 10.4% and 8.6%. A blurred invented passport that the app returned as "IMRAN" now comes back as "IMRAN SINGH" with no marks.
+
+**A silent error appeared on the way and was fixed.** Once names were found completely, names that used to be marked because they looked incomplete (a surname missing) were no longer marked, and four run-together names became silent (also a dot in "AR.JUN"). Rule 3 above is the fix, and it is why the long-word mark also holds against the machine-readable lines agreeing.
+
+**Still weak:** low-light passports (60% right, 27.5% missed outright: nothing at all is read). Names that the two readers merge under blur are caught only by their length, so a merged name of 9 letters or less (DEVIPATEL) can still pass unmarked when no machine-readable line was read to split it.
+
+## Low-light passports (ninth round)
+
+Low-light passports read 60% right, with 27% of fields missed outright. Reading what the readers returned showed that **PaddleOCR was not failing**: on the ten low-light passports it returned all 13 lines, including both dates, number and names. The fields were lost afterwards, in two places:
+1. **Date labels were misread** ("rate of Birth", "Date of Brth", "Dale ot Exply"), so the pattern that finds a date by its label found nothing, even though the date itself sat on the next line, read correctly. For passports the label word is now matched by edit distance (birth and expiry, up to 2 changes: `dateAfter`). If both labels are unreadable, the two dates on the page are taken in printed order (birth, then expiry; the machine-readable lines are skipped), and one date left over goes to the field still empty only if it fits (a birth date before the expiry date, and the other way round). Anything found this way is marked as found by position. Three or more dates, or another kind of document, are never guessed.
+2. **The machine-readable line is shorter and mangled** in low light ("L7598775-01ND970818..."), including "IND" read as "1ND". Its anchor now accepts I, 1 or L for the I and D, 0 or O for the D. The check digits still decide whether anything from it is believed.
+
+A smaller one: a separator read as a digit ("09/0772033" for "09/07/2033") lost the expiry date. A date with one damaged separator is accepted when the year is plausible (19xx or 20xx) and the date is real, and it is marked.
+
+| passports (invented, both readers) | before | after |
+|---|---|---|
+| Low-light fields (40: 6 passports from set 1, 4 held out) | 60% right, 27.5% missed | **87.5%**, 0 missed |
+| All passport fields, passports 1 to 6 (192 fields) | 98% (names fixed in round 8) | **98.4%** |
+| All passport fields, held-out passports 7 to 10 (128 fields) | 94% | **95.3%** |
+| Silent errors, both sets | 0 | **0** |
+
+The rest of the table is unchanged: set 1 98.5% right, held-out 97.5%, share of right values marked 9.7% and 9.0%. **Low-light passports: 35 of 40 fields right. The 5 that are not are names** that were already marked: junk characters ("AR.JUN"), a letter misread ("PAYEL" for PATEL, "KARTNIKLAL" for KARTHIK LAL) and given names run together. A low-light invented passport in the real app gave the right number, birth date and expiry, with its name wrong and marked.
+
+**Caveat:** low light here is a simulated brightness and contrast drop with a little noise on a cream page. Real dim photos have other problems (colour cast, motion), and real passports have security patterns and holograms across the text.
+
+## Real-photo hazards (tenth round)
+
+Nothing here uses a real photo. But the first eight conditions left out things that real phone photos are full of, so the generator (`eval/degrade.ts`) gained six more, run on 4 people and all 6 layouts (144 images), with both readers:
+
+| hazard | what it is | before | after |
+|---|---|---|---|
+| sideways | card laid across the frame, a quarter turn either way | **0%** (nothing read) | **100%** |
+| upside | rotated 180 degrees | **0%** (93% missed) | **100%** |
+| perspective | keystone: the far edge 10 to 20% narrower | 95% | 95% |
+| pattern | tinted card, wavy security lines, holographic stripe over the text | 100% | 100% |
+| shadow | a hand's shadow over half the card, warm colour cast | 100% | 100% |
+| motion | 4 to 8 pixel directional blur (an earlier 7 to 13 pixel version read 13%) | 13% | **77%** (14% missed, 0 silent) |
+
+Over all six: **95.4% right, 0.0% silent errors** (Tesseract alone: 69.6%; PaddleOCR alone: 94.0% with 0.2% silent). Three of the six were already fine, so the app was only exposed on orientation and on heavy motion blur. Nothing was silently wrong even where it failed: failures were reads that found nothing.
+
+**What was added for orientation** (`findTurns` in `src/ocr/paddle.ts`, rules in `src/ocr/orientation.ts`): the detector runs once on a small copy of the photo. If the text boxes are mostly tall (at least three, and twice as many tall as wide) the photo is turned a quarter turn. The text-direction classifier that ships in the same model package (`cls.onnx`, 0.6 MB) then votes on up to ten text lines to say whether the text is also upside down, and a clear majority is required (at least 4 votes and 3 times the upright votes). The turn found is applied to both readers, so Tesseract benefits too (its sideways and upside-down reads went from 0% to 97.6% and 96.4%). Cost: about one extra detection pass (roughly one second) on every photo.
+
+**The orientation check was itself tested for false alarms.** Across 504 invented photos (6 people, 6 layouts, all 14 conditions) it made the right call every time: no normal photo was turned, all 72 upside-down cards got 2 turns, all 72 sideways cards an odd number. A first version made one wrong call (an upright, slightly tilted Aadhaar flipped on 3 votes to 2); a clear-majority rule fixed that without affecting the real upside-down cards (7 to 10 votes against 0 or 1). A wrong flip would ruin a read, so that margin matters. A wrong sideways call is guarded by needing mostly tall boxes.
+
+**Not covered, and what real photos would still bring:** strong perspective beyond keystone (a card tilted away at 45 degrees), a card partly out of frame, a finger over a line of text, glossy reflections that hide whole words, creases, and the fonts and layouts of real cards, which differ by state and year. Orientation is found from the text boxes, so a card with very little printed text could be misjudged. These are the right things to check on a few of your own cards, privately, before trusting any figure here.
+
 ## Known weak spots (next work)
 
-- **Passport** is still the weakest layout (78% with both readers); the machine-readable lines at the bottom are not used yet.
-- **Real photos**: everything here is invented cards. The 18% of right values still marked for checking is a cost worth lowering once real photos can be tried.
+- **Passport names** under low light, blur and noise: junk characters and given names run together are caught by marks (not fixed). All other passport fields are about 97%.
+- **Real photos**: everything here is invented cards, so the readers' agreement and the rate of marks need checking on real ones (privately, by the owner of the documents). Sideways, upside-down, keystone, security-pattern and shadow photos are covered by the tenth round; heavy motion blur (about 77%) is the weakest of those.
 - **Aadhaar front** misses the name and date when OCR joins lines or drops them.
 - **Tilt beyond 15 degrees, sideways cards and perspective distortion** are not corrected. Tilts of 4 to 8 degrees now read at about 93%, with no silent errors on the held-out set.
 - **Hindi and other scripts** are ignored (English data only).

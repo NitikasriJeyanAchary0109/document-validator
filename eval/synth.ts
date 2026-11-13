@@ -2,6 +2,7 @@
 // generated (Aadhaar with a valid checksum), nothing resembling a real person. The layouts imitate the *roles* of the
 // printed text on real cards (labels, values, header lines, a Devanagari line, a photo box, noise), not their exact
 // design, so these numbers say how robust the reader is to photo quality, not how it does on every real layout.
+import { passportMrz } from '../src/core/testkit'
 import { verhoeffCheckDigit } from '../src/core/validators'
 import type { DocTypeId } from '../src/rules/types'
 import type { Fields } from './score'
@@ -260,8 +261,10 @@ export function drawCard(kind: Kind, p: Person, r: Rng): Sample {
       x.font = 'bold 28px Arial'
       x.fillText(p.passportExpiry, 280, 480)
       x.font = '26px monospace'
-      x.fillText(`P<IND${p.surname}<<${p.given.replace(/ /g, '<')}<<<<<<<<<<<`, 40, 600)
-      x.fillText(`${p.passportNo}<8IND${p.dob.slice(-2)}<<<<<<<<<<<<<<<<<<<<<<<<<<04`, 40, 640)
+      const yymmdd = (d: string) => `${d.slice(8, 10)}${d.slice(3, 5)}${d.slice(0, 2)}`
+      const [mrz1, mrz2] = passportMrz({ surname: p.surname, given: p.given, number: p.passportNo, dob: yymmdd(p.dob), expiry: yymmdd(p.passportExpiry) })
+      x.fillText(mrz1, 40, 600)
+      x.fillText(mrz2, 40, 640)
       return { kind, canvas: c, truth: { number: p.passportNo, name: `${p.given} ${p.surname}`, dob: p.dob, expiryDate: p.passportExpiry } }
     }
   }

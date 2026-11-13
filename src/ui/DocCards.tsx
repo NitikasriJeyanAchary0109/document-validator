@@ -2,7 +2,7 @@ import { parseDate } from '../core/dates'
 import type { ProvidedDoc } from '../core/engine'
 import { validateNumber } from '../core/validators'
 import { DOCS, FIELD_LABELS, FIELD_PLACEHOLDERS, docLabel } from '../rules/documents'
-import type { DocTypeId, FieldKey } from '../rules/types'
+import type { FieldKey } from '../rules/types'
 
 export type ScanState =
   | { status: 'reading'; progress: number }
@@ -12,9 +12,6 @@ export type ScanState =
 
 interface Props {
   docs: ProvidedDoc[]
-  /** Types that can be added for this service, for the "add another" menu. */
-  addable: DocTypeId[]
-  onAdd: (type: DocTypeId) => void
   onRemove: (id: string) => void
   onField: (id: string, field: FieldKey, value: string) => void
   /** Read this document's fields from a photo, on this device. */
@@ -24,12 +21,14 @@ interface Props {
 
 const DATE_FIELDS: FieldKey[] = ['dob', 'issueDate', 'expiryDate']
 
-export function DocCards({ docs, addable, onAdd, onRemove, onField, onScan, scans }: Props) {
+/** The documents the person has added, each with a photo button and its fields. Nothing shows until one is added. */
+export function DocCards({ docs, onRemove, onField, onScan, scans }: Props) {
+  if (docs.length === 0) return null
   return (
-    <section aria-labelledby="docs-h" className="panel">
-      <h2 id="docs-h">Your documents</h2>
-      <p className="hint">Type what is printed on each document, or read it from a photo. Photos are read on this device and thrown away: nothing is saved or sent anywhere.</p>
-      {docs.length === 0 && <p className="empty">No documents added yet. Use the buttons in the list above, or the menu below.</p>}
+    <section aria-labelledby="docs-h" className="block">
+      <h2 id="docs-h" className="block-h">
+        Your documents
+      </h2>
       <ul className="docs" role="list">
         {docs.map((d) => (
           <li key={d.id} className="doc" id={`doc-${d.id}`}>
@@ -39,7 +38,6 @@ export function DocCards({ docs, addable, onAdd, onRemove, onField, onScan, scan
                 Remove
               </button>
             </div>
-            {DOCS[d.type].hint && <p className="hint">{DOCS[d.type].hint}</p>}
             {DOCS[d.type].fields.length === 0 ? (
               <p className="tick">✓ You have this.</p>
             ) : (
@@ -55,19 +53,6 @@ export function DocCards({ docs, addable, onAdd, onRemove, onField, onScan, scan
           </li>
         ))}
       </ul>
-      {addable.length > 0 && (
-        <label className="field add">
-          <span className="label">Add another document</span>
-          <select value="" onChange={(e) => e.target.value && onAdd(e.target.value as DocTypeId)}>
-            <option value="">Choose a document…</option>
-            {addable.map((t) => (
-              <option key={t} value={t}>
-                {docLabel(t)}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
     </section>
   )
 }
@@ -75,6 +60,18 @@ export function DocCards({ docs, addable, onAdd, onRemove, onField, onScan, scan
 function ScanBar({ doc, state, onScan }: { doc: ProvidedDoc; state: ScanState | undefined; onScan: (id: string, file: File) => void }) {
   const inputId = `${doc.id}-photo`
   const busy = state?.status === 'reading'
+  const note =
+    state?.status === 'reading'
+      ? `Reading… ${Math.round(state.progress * 100)}%`
+      : state?.status === 'done'
+        ? state.check.length > 0
+          ? 'Check the marked fields against your document.'
+          : 'Check each field against your document.'
+        : state?.status === 'empty'
+          ? 'Could not read it. Try a flat, well-lit photo, or type the details.'
+          : state?.status === 'error'
+            ? 'Could not read that photo. Try another, or type the details.'
+            : 'Read on this device. Nothing is sent anywhere.'
   return (
     <div className="scan">
       <label className={`btn btn-ghost scan-btn${busy ? ' is-busy' : ''}`} htmlFor={inputId}>
@@ -93,11 +90,7 @@ function ScanBar({ doc, state, onScan }: { doc: ProvidedDoc; state: ScanState | 
         }}
       />
       <span className="scan-note" role="status" aria-live="polite">
-        {state?.status === 'reading' && `Reading on this device… ${Math.round(state.progress * 100)}%`}
-        {state?.status === 'done' && (state.check.length > 0 ? `Filled ${state.found} field${state.found === 1 ? '' : 's'}. Check the marked ones against your document.` : `Filled ${state.found} field${state.found === 1 ? '' : 's'}. Check each against your document.`)}
-        {state?.status === 'empty' && 'Could not read anything useful. Try a flat, well-lit photo of the front, or type the details.'}
-        {state?.status === 'error' && 'Could not read that photo. Try another, or type the details.'}
-        {!state && 'Front of the document, flat and well lit.'}
+        {note}
       </span>
     </div>
   )
@@ -112,11 +105,11 @@ function FieldInput({ doc, field, onChange, recheck }: { doc: ProvidedDoc; field
   if (value.trim()) {
     if (field === 'number' && def.numberKind) {
       const r = validateNumber(def.numberKind, value)
-      hint = r.status === 'valid' ? { text: 'Looks like the right format.', bad: false } : { text: r.reason ?? 'Check this number.', bad: true }
+      hint = r.status === 'valid' ? null : { text: r.reason ?? 'Check this number.', bad: true }
     } else if (DATE_FIELDS.includes(field) && !parseDate(value)) {
       hint = { text: 'Use DD/MM/YYYY.', bad: true }
     }
-    if (!hint && recheck) hint = { text: 'Read from the photo and not certain. Check it against the document.', bad: true }
+    if (!hint && recheck) hint = { text: 'Not certain. Check it against the document.', bad: true }
   }
   const wide = field === 'address' || field === 'name' || field === 'fatherName'
   return (

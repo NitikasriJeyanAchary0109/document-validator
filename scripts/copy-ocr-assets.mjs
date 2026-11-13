@@ -14,6 +14,7 @@ const files = [
   ['node_modules/@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz', 'eng.traineddata.gz'],
   ['node_modules/@gutenye/ocr-models/assets/ch_PP-OCRv4_det_infer.onnx', 'det.onnx'],
   ['node_modules/@gutenye/ocr-models/assets/ch_PP-OCRv4_rec_infer.onnx', 'rec.onnx'],
+  ['node_modules/@gutenye/ocr-models/assets/ch_ppocr_mobile_v2.0_cls_infer.onnx', 'cls.onnx'],
   ['node_modules/@gutenye/ocr-models/assets/ppocr_keys_v1.txt', 'dict.txt'],
   ['node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.mjs'],
   ['node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.wasm'],

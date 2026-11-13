@@ -29,7 +29,7 @@ interface Captured {
   msB: number
   msC: number
   /** Extra experimental reads (all levelled), by variant name. */
-  v: Record<string, { lines: OcrLine[]; ms: number }>
+  v: Record<string, { lines: OcrLine[]; ms: number; turns?: number }>
   failed: boolean
 }
 
@@ -38,6 +38,8 @@ interface Policy {
   /** Cascade: read again with the dim-light clean-up when the first read's quality is below this. */
   below?: number
   lowConf?: number
+  /** Use the passport's machine-readable lines (default: as the app does). */
+  mrz?: boolean
 }
 
 declare global {
@@ -54,7 +56,9 @@ const status = document.getElementById('status') as HTMLElement
 
 function replay(captured: Captured[], p: Policy): string {
   const keep = tuning.lowConf
+  const keepMrz = tuning.mrz
   if (p.lowConf !== undefined) tuning.lowConf = p.lowConf
+  if (p.mrz !== undefined) tuning.mrz = p.mrz
   const results: Result[] = captured.map((c) => {
     let lines = c.a
     let ms = c.msA
@@ -107,6 +111,7 @@ function replay(captured: Captured[], p: Policy): string {
     return { kind: c.kind, condition: c.condition, truth: c.truth, fields, check, ms, failed: c.failed }
   })
   tuning.lowConf = keep
+  tuning.mrz = keepMrz
   return report(results)
 }
 
@@ -118,20 +123,23 @@ const VARIANTS: Record<string, { mode: PrepMode; page: PageMode }> = {
 
 async function readVariant(blob: Blob, name: string) {
   const t = performance.now()
-  if (name === 'paddle') return { lines: await readPaddle(blob), ms: performance.now() - t }
+  if (name === 'paddle') {
+    const { lines, turns } = await readPaddle(blob)
+    return { lines, ms: performance.now() - t, turns }
+  }
   const v = VARIANTS[name]!
   const lines = await readOnce(blob, () => undefined, v.mode, true, v.page)
   return { lines, ms: performance.now() - t }
 }
 
-async function main(from: number, people: number, conditions: readonly Condition[]) {
+async function main(from: number, people: number, conditions: readonly Condition[], kinds: readonly (typeof KINDS)[number][] = KINDS) {
   const captured: Captured[] = []
   window.__captured = captured
   window.__replay = (p) => replay(captured, p)
-  const total = (people - from + 1) * KINDS.length * conditions.length
+  const total = (people - from + 1) * kinds.length * conditions.length
   for (let seed = from; seed <= people; seed++) {
     const person = makePerson(seed)
-    for (const kind of KINDS) {
+    for (const kind of kinds) {
       for (const cond of conditions) {
         const rng = mulberry32(seed * 1000 + KINDS.indexOf(kind) * 10 + CONDITIONS.indexOf(cond))
         const sample = drawCard(kind, person, rng)
@@ -146,11 +154,13 @@ async function main(from: number, people: number, conditions: readonly Condition
             row.b = await readOnce(blob, () => undefined, 'flat', false)
             row.msB = performance.now() - t1
           }
+          // PaddleOCR is read first when asked for: it finds how the photo is turned, and the Tesseract read uses the same turn.
+          if (variants.includes('paddle') && !lazy) row.v.paddle = await readVariant(blob, 'paddle')
           const t2 = performance.now()
-          row.c = await readOnce(blob, () => undefined, 'stretch', true)
+          row.c = await readOnce(blob, () => undefined, 'stretch', true, 'auto', row.v.paddle?.turns ?? 0)
           row.msC = performance.now() - t2
-          // Variants are alternatives to a poor first read, so (with &lazy=1) they are only read when the first read looks poor.
-          if (!lazy || readQuality(row.c) < 60) for (const name of variants) row.v[name] = await readVariant(blob, name)
+          // Other variants are alternatives to a poor first read, so (with &lazy=1) they are only read when it looks poor.
+          if (!lazy || readQuality(row.c) < 60) for (const name of variants) if (!row.v[name]) row.v[name] = await readVariant(blob, name)
         } catch {
           row.failed = true
         }
@@ -171,10 +181,11 @@ const params = new URLSearchParams(location.search)
 const people = Number(params.get('people') ?? 4)
 const from = Number(params.get('from') ?? 1)
 const variants = (params.get('variants') ?? '').split(',').filter((n) => n in VARIANTS || n === 'paddle')
+const onlyKinds = params.get('kinds')?.split(',').filter((k): k is (typeof KINDS)[number] => (KINDS as readonly string[]).includes(k))
 const lean = params.get('lean') === '1'
 const lazy = params.get('lazy') === '1'
 const only = params.get('conditions')?.split(',').filter((c): c is Condition => (CONDITIONS as readonly string[]).includes(c))
-document.getElementById('go')?.addEventListener('click', () => void main(from, people, only?.length ? only : CONDITIONS))
+document.getElementById('go')?.addEventListener('click', () => void main(from, people, only?.length ? only : CONDITIONS, onlyKinds?.length ? onlyKinds : KINDS))
 const restore = params.get('restore')
 if (restore) {
   // Reload readings saved by an earlier run (&save=KEY), several keys joined with commas, so policies can be scored again.
@@ -186,4 +197,4 @@ if (restore) {
   window.__replay = (p) => replay(captured, p)
   status.textContent = `Restored ${captured.length} images.`
 }
-if (params.get('run') === '1') void main(from, people, only?.length ? only : CONDITIONS)
+if (params.get('run') === '1') void main(from, people, only?.length ? only : CONDITIONS, onlyKinds?.length ? onlyKinds : KINDS)

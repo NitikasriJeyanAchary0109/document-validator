@@ -43,9 +43,9 @@ const PSM: Record<PageMode, string> = { auto: '3', sparse: '11' }
 let appliedPsm = PSM.auto
 
 /** One read with one kind of image preparation. */
-export async function readOnce(file: Blob, progress: (p: number) => void, mode: PrepMode = 'stretch', level = true, page: PageMode = 'auto'): Promise<OcrLine[]> {
+export async function readOnce(file: Blob, progress: (p: number) => void, mode: PrepMode = 'stretch', level = true, page: PageMode = 'auto', turns = 0): Promise<OcrLine[]> {
   onProgress = progress
-  const canvas = await prepareImage(file, mode, level)
+  const canvas = await prepareImage(file, mode, level, turns)
   try {
     const worker = await getWorker()
     if (PSM[page] !== appliedPsm) {
@@ -96,14 +96,15 @@ export async function readPhoto(file: Blob, progress: (p: number) => void): Prom
  */
 export async function readFields(type: DocTypeId, file: Blob, progress: (p: number) => void): Promise<Extraction> {
   let paddleLines: OcrLine[]
+  let turns = 0
   try {
-    paddleLines = await (await paddle()).readPaddle(file, (p) => progress(p * 0.5))
+    ;({ lines: paddleLines, turns } = await (await paddle()).readPaddle(file, (p) => progress(p * 0.5)))
   } catch {
     return extractFields(type, await readPhoto(file, progress))
   }
   const primary = extractFields(type, paddleLines)
   try {
-    const second = await readOnce(file, (p) => progress(0.5 + p * 0.5), 'stretch')
+    const second = await readOnce(file, (p) => progress(0.5 + p * 0.5), 'stretch', true, 'auto', turns)
     return combineReads(primary, extractFields(type, second))
   } catch {
     return primary

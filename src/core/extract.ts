@@ -3,7 +3,9 @@
 // anything we are unsure about is flagged in `check` instead of being dropped or guessed silently.
 import { DOCS } from '../rules/documents'
 import type { DocTypeId, FieldKey } from '../rules/types'
-import { formatDate, parseFullDate } from './dates'
+import { compareFull, formatDate, parseFullDate } from './dates'
+import { parseMrz } from './mrz'
+import { levenshtein } from './names'
 import { validateNumber, type NumberKind } from './validators'
 
 export interface OcrLine {
@@ -12,14 +14,20 @@ export interface OcrLine {
   conf: number
 }
 
+/** Why a field is marked: it failed a format check or had junk cleaned off ('format'), it was found by position or pattern rather
+ *  than by a label ('position'), or the line was read with low confidence ('confidence'). Several apply: the first listed wins, so a value found by position AND read with low confidence is a 'confidence' mark. */
+export type Mark = 'format' | 'confidence' | 'position'
+
 export interface Extraction {
   fields: Partial<Record<FieldKey, string>>
   /** Fields the user should look at twice: guessed by position, failed a format check, or read with low confidence. */
   check: FieldKey[]
+  /** The reason for each marked field, so that two readers agreeing can clear the kinds of mark that agreement settles. */
+  marks?: Partial<Record<FieldKey, Mark>>
 }
 
 /** Lines read below this confidence are marked for checking. Tuned by `eval/` on invented cards. */
-export const tuning = { lowConf: 70 }
+export const tuning = { lowConf: 70, /** Use a passport's machine-readable lines. The evaluation switches it off to measure what it adds. */ mrz: true }
 
 export const linesFromText = (text: string): OcrLine[] => text.split(/\r?\n/).map((t) => ({ text: t, conf: 100 }))
 
@@ -37,11 +45,22 @@ const DATE_RE = /([0-9OoIl|]{1,2})\s*[/\-.]\s*([0-9OoIl|]{1,2})\s*[/\-.]\s*([0-9
 
 /** Dates found in the text. Cards print day and month as two digits, so a one-digit day or month usually means a digit
  *  was lost in the photo ("A 5/03/1980" for "15/03/1980"); such a date is returned but marked unsure. */
+/** Day, month and year with the second separator read as 7, 1, I, l or |: "09/0772033". */
+const DAMAGED_DATE_RE = /(?<!\d)(\d{2})\s*[/\-.]\s*(\d{2})[71Il|]((?:19|20)\d{2})(?!\d)/g
+
 function datesIn(text: string): { value: string; unsure: boolean }[] {
   const out: { value: string; unsure: boolean }[] = []
   for (const m of text.matchAll(DATE_RE)) {
     const p = parseFullDate(`${fixDigits(m[1]!)}/${fixDigits(m[2]!)}/${fixDigits(m[3]!)}`)
     if (p) out.push({ value: formatDate(p), unsure: m[1]!.length < 2 || m[2]!.length < 2 })
+  }
+  if (out.length === 0) {
+    // One separator may have been read as a digit-like character ("09/0772033" for "09/07/2033"). It is only accepted when
+    // what is left is a real date with a plausible year, and the person is asked to check it.
+    for (const m of text.matchAll(DAMAGED_DATE_RE)) {
+      const p = parseFullDate(`${m[1]}/${m[2]}/${m[3]}`)
+      if (p) out.push({ value: formatDate(p), unsure: true })
+    }
   }
   return out
 }
@@ -72,20 +91,93 @@ function afterLabel(lines: OcrLine[], label: RegExp, opts: { not?: RegExp; stop?
   return null
 }
 
+/** Words that head a passport's printed fields, so a line starting with one is a label and not a name. */
+const PASSPORT_LABEL = /^[^A-Za-z]*(type|country|passport|republic|s[a-z]{1,2}name|[cgq][ij1l]ven|name|date|sex|place|nationality|issue|expiry|authority|holder)/i
+
+interface Part {
+  hit: Hit
+  /** Index of the line the value is on, and of the line with the label. */
+  at: number
+  labelAt: number
+  by: 'label' | 'position'
+}
+
+/** A line that is a plain name: letters, spaces and the odd dot or hyphen, and not a field label. */
+const plainName = (l: OcrLine | undefined): l is OcrLine => !!l && /^[A-Za-z .'-]{2,}$/.test(l.text) && !PASSPORT_LABEL.test(l.text)
+
+/**
+ * The value printed under a passport label such as "Surname" or "Given Name(s)". Photos misspell labels ("Sumame", "Civen
+ * Narme(s)"), so the label word is matched by edit distance, and a "Name(s)" word after "Given" is skipped.
+ */
+function passportLabelValue(lines: OcrLine[], label: string, maxDistance: number): Part | null {
+  for (let i = 0; i < lines.length; i++) {
+    const words = lines[i]!.text.split(' ')
+    for (let j = 0; j < words.length; j++) {
+      const w = words[j]!.replace(/[^A-Za-z]/g, '').toLowerCase()
+      if (Math.abs(w.length - label.length) > maxDistance || levenshtein(w, label) > maxDistance) continue
+      let rest = words.slice(j + 1)
+      if (/^n[a-z]{1,4}\(?s?\)?$/i.test(rest[0] ?? '') && label === 'given') rest = rest.slice(1)
+      const same = rest.join(' ').trim()
+      if (/[A-Za-z]{2}/.test(same) && !PASSPORT_LABEL.test(same)) return { hit: { value: same, conf: lines[i]!.conf }, at: i, labelAt: i, by: 'label' }
+      const next = lines[i + 1]
+      if (plainName(next)) return { hit: { value: next.text, conf: next.conf }, at: i + 1, labelAt: i, by: 'label' }
+    }
+  }
+  return null
+}
+
+/** Surname and given names of a passport. If one label cannot be found, the plain line next to the other one is taken. */
+function passportParts(lines: OcrLine[]): { sur: Part | null; given: Part | null } {
+  let sur = passportLabelValue(lines, 'surname', 2)
+  let given = passportLabelValue(lines, 'given', 1)
+  if (!sur && given) {
+    // The printed order is Surname, then Given Name(s): the plain line above the given-names label is the surname.
+    const above = lines[given.labelAt - 1]
+    if (plainName(above)) sur = { hit: { value: above.text, conf: above.conf }, at: given.labelAt - 1, labelAt: given.labelAt - 1, by: 'position' }
+  }
+  if (sur && !given) {
+    // The given names follow the surname, after their (unreadable) label if that was read as a line of its own.
+    const skip = /[cgq][ij1l]ven/i.test(lines[sur.at + 1]?.text ?? '') ? 2 : 1
+    const below = lines[sur.at + skip]
+    if (plainName(below)) given = { hit: { value: below.text, conf: below.conf }, at: sur.at + skip, labelAt: sur.at, by: 'position' }
+  }
+  return { sur, given }
+}
+
 /** A line that looks like another field label, so it is not mistaken for the value of the one before it. */
 const LABELISH = /^[^A-Za-z]*(father|mother|husband|name|date|dob|d\.o\.b|gender|sex|address|issue|valid|expiry|signature|permanent)/i
 
-function dateAfter(lines: OcrLine[], label: RegExp): Hit | null {
+/**
+ * The date after a label. Photos misspell labels ("Date of Brth", "rate of Birth"), so when the label pattern finds nothing,
+ * `fuzzy` gives label words to match by edit distance instead, as [word, largest distance].
+ */
+function dateAfter(lines: OcrLine[], label: RegExp, fuzzy: [string, number][] = []): Hit | null {
   const re = new RegExp(label.source, 'i')
-  for (let i = 0; i < lines.length; i++) {
-    const t = lines[i]!.text
-    const m = re.exec(t)
-    if (!m) continue
-    const same = datesIn(t.slice(m.index + m[0].length))
+  const after = (i: number, rest: string): Hit | null => {
+    const same = datesIn(rest)
     if (same[0]) return { value: same[0].value, conf: lines[i]!.conf, unsure: same[0].unsure }
     const next = lines[i + 1]
     const nd = next ? datesIn(next.text) : []
     if (next && nd[0]) return { value: nd[0].value, conf: next.conf, unsure: nd[0].unsure }
+    return null
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i]!.text
+    const m = re.exec(t)
+    if (!m) continue
+    const hit = after(i, t.slice(m.index + m[0].length))
+    if (hit) return hit
+  }
+  for (const [word, distance] of fuzzy) {
+    for (let i = 0; i < lines.length; i++) {
+      const words = lines[i]!.text.split(' ')
+      for (let j = 0; j < words.length; j++) {
+        const w = words[j]!.replace(/[^A-Za-z]/g, '').toLowerCase()
+        if (w.length < 3 || Math.abs(w.length - word.length) > distance || levenshtein(w, word) > distance) continue
+        const hit = after(i, words.slice(j + 1).join(' '))
+        if (hit) return hit
+      }
+    }
   }
   return null
 }
@@ -94,6 +186,10 @@ function dateAfter(lines: OcrLine[], label: RegExp): Hit | null {
  * Letters only. Photos add junk to the end of a name line (a border, a photo edge, a stamp): short or mixed-case
  * tails such as "ARJUN PATEL oO" or "ASHA SHARMA O". Those are dropped, and the name is marked for checking.
  */
+/** A name word of this many letters or more is marked as possibly two words run together. Tuned by `eval/`. */
+const LONG_NAME_WORD = 10
+const suspectWord = (w: string) => w.replace(/[^A-Za-z]/g, '').length >= LONG_NAME_WORD || /[A-Za-z]\.[A-Za-z]/.test(w)
+
 function cleanName(raw: string): { value: string; unsure: boolean } {
   const t = raw.replace(/[^A-Za-z .'-]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean)
   let unsure = false
@@ -111,6 +207,8 @@ function cleanName(raw: string): { value: string; unsure: boolean } {
     unsure = true
   }
   if (t.length === 2 && last().length <= 2) unsure = true
+  // A very long word is often two words the photo ran together ("GURPREETKUMARI"), and a dot inside a word is junk ("AR.JUN").
+  if (t.some(suspectWord)) unsure = true
   return { value: t.join(' '), unsure }
 }
 
@@ -198,10 +296,20 @@ export function extractFields(type: DocTypeId, input: string | OcrLine[]): Extra
   const def = DOCS[type]
   const fields: Extraction['fields'] = {}
   const check = new Set<FieldKey>()
-  const put = (f: FieldKey, hit: Hit | null, unsure = false) => {
+  const marks: Partial<Record<FieldKey, Mark>> = {}
+  /** The surname as read from the printed text of a passport, which the machine-readable lines are lined up against. */
+  let printedSurname: string | undefined
+  const RANK: Mark[] = ['format', 'confidence', 'position']
+  const mark = (f: FieldKey, m: Mark) => {
+    check.add(f)
+    if (!marks[f] || RANK.indexOf(m) < RANK.indexOf(marks[f]!)) marks[f] = m
+  }
+  const put = (f: FieldKey, hit: Hit | null, unsure: false | Mark = false) => {
     if (!hit || fields[f]) return
     fields[f] = hit.value
-    if (unsure || hit.unsure || hit.conf < tuning.lowConf) check.add(f)
+    if (unsure) mark(f, unsure)
+    if (hit.unsure) mark(f, 'format')
+    if (hit.conf < tuning.lowConf) mark(f, 'confidence')
   }
 
   for (const f of def.fields) {
@@ -209,55 +317,130 @@ export function extractFields(type: DocTypeId, input: string | OcrLine[]): Extra
       case 'number': {
         if (!def.numberKind) break
         if (def.numberKind === 'plain') {
-          put('number', afterLabel(lines, /(?:l\.?\s*l\.?|licen[cs]e|learner'?s?)\s*(?:no|number)\.?/), true)
+          put('number', afterLabel(lines, /(?:l\.?\s*l\.?|licen[cs]e|learner'?s?)\s*(?:no|number)\.?/), 'position')
           break
         }
         const n = findNumber(lines, def.numberKind)
-        if (n) put('number', n.hit, !n.valid)
+        if (n) put('number', n.hit, n.valid ? false : 'format')
         break
       }
       case 'dob':
-        put('dob', dateAfter(lines, DOB_LABEL))
+        put('dob', dateAfter(lines, DOB_LABEL, type === 'passport' ? [['birth', 2]] : []))
         break
       case 'issueDate':
         put('issueDate', dateAfter(lines, ISSUE_LABEL))
         break
       case 'expiryDate':
-        put('expiryDate', dateAfter(lines, EXPIRY_LABEL))
+        put('expiryDate', dateAfter(lines, EXPIRY_LABEL, type === 'passport' ? [['expiry', 2]] : []))
         break
       case 'fatherName': {
         const h = afterLabel(lines, FATHER_LABEL)
         if (h) {
           const n = cleanName(h.value)
-          put('fatherName', { ...h, value: n.value }, n.unsure || !/^[A-Za-z .'-]{3,}$/.test(h.value))
+          put('fatherName', { ...h, value: n.value }, n.unsure || !/^[A-Za-z .'-]{3,}$/.test(h.value) ? 'format' : false)
         }
         break
       }
       case 'name': {
         if (type === 'passport') {
-          const given = afterLabel(lines, /given\s*name\(?s?\)?/)
-          const sur = afterLabel(lines, /surname/)
+          const parts = passportParts(lines)
+          printedSurname = parts.sur?.hit.value
+          const given = parts.given?.hit
+          const sur = parts.sur?.hit
           if (given || sur) {
             const n = cleanName(`${given?.value ?? ''} ${sur?.value ?? ''}`)
-            // A passport has both parts: with one missing, the name is incomplete.
-            put('name', { value: n.value, conf: Math.min(given?.conf ?? 100, sur?.conf ?? 100) }, n.unsure || !given || !sur)
+            // A passport has both parts: with one missing, the name is incomplete. One found only by its place is marked as such.
+            const how = parts.sur?.by === 'position' || parts.given?.by === 'position' ? 'position' : false
+            put('name', { value: n.value, conf: Math.min(given?.conf ?? 100, sur?.conf ?? 100) }, n.unsure || !given || !sur ? 'format' : how)
           }
           break
         }
         const labelled = afterLabel(lines, NAME_LABEL, { not: /father|mother|husband|s\/o|d\/o|w\/o|guardian|\bson\b/i })
         if (labelled) {
           const n = cleanName(labelled.value)
-          put('name', { ...labelled, value: n.value }, n.unsure)
+          put('name', { ...labelled, value: n.value }, n.unsure ? 'format' : false)
         }
-        else if (type === 'aadhaar') put('name', aadhaarName(lines), true)
+        else if (type === 'aadhaar') put('name', aadhaarName(lines), 'position')
         break
       }
       case 'address':
-        put('address', addressOf(lines), true)
+        put('address', addressOf(lines), 'position')
         break
+    }
+  }
+  // A passport prints the date of birth above the date of expiry. When their labels were too damaged to read, two dates on the
+  // page (not counting the machine-readable lines) are taken in that order, and one date left over goes to the field still empty.
+  if (type === 'passport' && (!fields.dob || !fields.expiryDate)) {
+    const seen: { value: string; conf: number }[] = []
+    for (const l of lines) {
+      if (/<{2,}/.test(l.text)) continue
+      for (const d of datesIn(l.text)) if (!seen.some((x) => x.value === d.value) && !d.unsure) seen.push({ value: d.value, conf: l.conf })
+    }
+    const left = seen.filter((d) => d.value !== fields.dob && d.value !== fields.expiryDate)
+    const when = (v: string) => parseFullDate(v)
+    const before = (a: string, b: string) => {
+      const x = when(a)
+      const y = when(b)
+      return !!x && !!y && compareFull(x, y) < 0
+    }
+    if (!fields.dob && !fields.expiryDate && left.length === 2 && before(left[0]!.value, left[1]!.value)) {
+      put('dob', left[0]!, 'position')
+      put('expiryDate', left[1]!, 'position')
+    } else if (!fields.expiryDate && fields.dob && left.length === 1 && before(fields.dob, left[0]!.value)) put('expiryDate', left[0]!, 'position')
+    else if (!fields.dob && fields.expiryDate && left.length === 1 && before(left[0]!.value, fields.expiryDate)) put('dob', left[0]!, 'position')
+  }
+  // A passport's machine-readable lines carry check digits. A value that passes its own check digit is shown instead of the
+  // printed one; it is also trusted without a mark when the printed text agrees with it or the check over the whole line
+  // passes too (a lone check digit has ten values, so on its own it lets about one wrong read in ten through).
+  const mrz = type === 'passport' && tuning.mrz ? parseMrz(lines.map((l) => l.text)) : null
+  if (mrz) {
+    const take = (f: FieldKey, v: string | undefined) => {
+      if (!v) return
+      const agrees = fields[f] === v
+      fields[f] = v
+      if (agrees || mrz.composite) {
+        check.delete(f)
+        delete marks[f]
+      } else mark(f, 'format')
+    }
+    take('number', mrz.number)
+    take('dob', mrz.dob)
+    take('expiryDate', mrz.expiry)
+    // The names on line 1 give "given names + surname" with the spacing the "<" marks. When the double "<<" between surname and
+    // given names was not read, the printed surname says where the surname ends.
+    let name: string | undefined
+    const letters = (v: string) => v.toUpperCase().replace(/[^A-Z]/g, '')
+    if (mrz.tokens && printedSurname) {
+      const want = letters(printedSurname)
+      for (let k = 1; k < mrz.tokens.length && !name; k++) {
+        if (letters(mrz.tokens.slice(0, k).join('')) === want) name = `${mrz.tokens.slice(k).join(' ')} ${mrz.tokens.slice(0, k).join(' ')}`
+      }
+    }
+    if (!name && mrz.surname && mrz.given) name = `${mrz.given} ${mrz.surname}`
+    if (name) {
+      // No check digit covers names: they replace the printed name only when they agree with it (which also settles its
+      // spacing), complete a cut-short printed name, and fill it in when it was not read at all (both marked for checking).
+      if (fields.name && letters(fields.name) === letters(name)) {
+        fields.name = name
+        // Both lines come from the same recogniser, which runs words together in the same way on both: a very long word
+        // stays marked even though the two agree.
+        if (name.split(' ').some(suspectWord)) mark('name', 'format')
+        else {
+          check.delete('name')
+          delete marks.name
+        }
+      } else if (fields.name && letters(name).includes(letters(fields.name)) && letters(fields.name).length >= 3) {
+        // The printed name was cut short (a missing surname line): the lines complete it, still marked.
+        fields.name = name
+        mark('name', 'format')
+      } else if (!fields.name) {
+        fields.name = name
+        mark('name', 'format')
+      }
     }
   }
   // Drop empties that cleaning reduced to nothing.
   for (const k of Object.keys(fields) as FieldKey[]) if (!fields[k]?.trim()) delete fields[k]
-  return { fields, check: [...check].filter((f) => fields[f] !== undefined) }
+  const kept = [...check].filter((f) => fields[f] !== undefined)
+  return { fields, check: kept, marks: Object.fromEntries(kept.map((f) => [f, marks[f]!])) }
 }

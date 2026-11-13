@@ -4,6 +4,7 @@
 // Recognition reads each box with a CTC decoder. Browser only: the text-to-fields step is in core/extract.ts.
 import * as ort from 'onnxruntime-web/wasm'
 import type { OcrLine } from '../core/extract'
+import { isSideways, isUpsideDown, turnedBox } from './orientation'
 import { discardCanvas, prepareImage } from './prepare'
 
 const base = () => new URL('ocr/', document.baseURI).href
@@ -20,6 +21,8 @@ const NARROW = /[1Il|i!.,:;/\\()]/
 interface Models {
   det: ort.InferenceSession
   rec: ort.InferenceSession
+  /** Tells whether a line of text is upside down. Optional: without it only sideways photos are turned. */
+  cls: ort.InferenceSession | null
   dict: string[]
 }
 let modelsPromise: Promise<Models> | null = null
@@ -30,13 +33,14 @@ function getModels(): Promise<Models> {
     ort.env.wasm.wasmPaths = dir
     ort.env.wasm.numThreads = 1
     const opts = { executionProviders: ['wasm'] }
-    const [det, rec, dictText] = await Promise.all([
+    const [det, rec, cls, dictText] = await Promise.all([
       ort.InferenceSession.create(`${dir}det.onnx`, opts),
       ort.InferenceSession.create(`${dir}rec.onnx`, opts),
+      ort.InferenceSession.create(`${dir}cls.onnx`, opts).catch(() => null),
       fetch(`${dir}dict.txt`).then((r) => r.text()),
     ])
     // CTC output: index 0 is "blank", then the dictionary in order, then a space.
-    return { det, rec, dict: ['', ...dictText.split(/\r?\n/).filter((l) => l.length > 0), ' '] }
+    return { det, rec, cls, dict: ['', ...dictText.split(/\r?\n/).filter((l) => l.length > 0), ' '] }
   })().catch((e) => {
     modelsPromise = null
     throw e
@@ -200,12 +204,83 @@ function toLines(items: { text: string; conf: number; box: Box }[]): OcrLine[] {
   })
 }
 
-/** One read of the photo with PaddleOCR. `progress` is called with 0 to 1 as the text boxes are read. */
-export async function readPaddle(file: Blob, progress: (p: number) => void = () => undefined): Promise<OcrLine[]> {
-  const canvas = await prepareImage(file, 'stretch', true)
+const ORIENT_LONG_SIDE = 800
+
+/** Votes of the last orientation check, for the evaluation to inspect. */
+export const lastVotes = { upright: 0, flipped: 0 }
+
+/** Is this line of text upside down? Votes of the angle classifier over crops; null when it has no clear answer. */
+async function upsideDown(m: Models, canvas: HTMLCanvasElement, boxes: Box[]): Promise<boolean | null> {
+  if (!m.cls) return null
+  const lines = boxes.filter((b) => b.x1 - b.x0 >= 2.5 * (b.y1 - b.y0) && b.y1 - b.y0 >= 8).sort((a, b) => b.x1 - b.x0 - (a.x1 - a.x0)).slice(0, 10)
+  let upright = 0
+  let flipped = 0
+  for (const b of lines) {
+    const bw = b.x1 - b.x0
+    const bh = b.y1 - b.y0
+    const w = Math.min(192, Math.ceil((48 * bw) / bh))
+    const crop = document.createElement('canvas')
+    crop.width = 192
+    crop.height = 48
+    const ctx = crop.getContext('2d', { willReadFrequently: true })!
+    ctx.fillStyle = '#808080'
+    ctx.fillRect(0, 0, 192, 48)
+    ctx.drawImage(canvas, b.x0, b.y0, bw, bh, 0, 0, w, 48)
+    const px = ctx.getImageData(0, 0, 192, 48).data
+    const input = new Float32Array(3 * 192 * 48)
+    for (let i = 0; i < 192 * 48; i++) for (let c = 0; c < 3; c++) input[c * 192 * 48 + i] = (px[i * 4 + c]! / 255 - 0.5) / 0.5
+    const out = await m.cls.run({ [m.cls.inputNames[0]!]: new ort.Tensor('float32', input, [1, 3, 48, 192]) })
+    const p = out[m.cls.outputNames[0]!]!.data as Float32Array
+    if (p[0]! > 0.8) upright++
+    else if (p[1]! > 0.8) flipped++
+  }
+  lastVotes.upright = upright
+  lastVotes.flipped = flipped
+  return upright + flipped < 2 ? null : isUpsideDown(upright, flipped)
+}
+
+/**
+ * How many quarter turns clockwise bring the photo upright (0 to 3). Text boxes that are mostly tall mean the card is on its
+ * side; the angle classifier then says whether the text also reads upside down.
+ */
+export async function findTurns(file: Blob): Promise<number> {
+  const m = await getModels()
+  const small = await prepareImage(file, 'stretch', false, 0)
   try {
-    const m = await getModels()
-    progress(0.1)
+    const scale = Math.min(1, ORIENT_LONG_SIDE / Math.max(small.width, small.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.round(small.width * scale)
+    canvas.height = Math.round(small.height * scale)
+    canvas.getContext('2d')!.drawImage(small, 0, 0, canvas.width, canvas.height)
+    const { boxes } = await detect(m, canvas)
+    const sideways = isSideways(boxes)
+    let upright = canvas
+    let uprightBoxes = boxes
+    if (sideways) {
+      upright = document.createElement('canvas')
+      upright.width = canvas.height
+      upright.height = canvas.width
+      const ctx = upright.getContext('2d')!
+      ctx.translate(upright.width / 2, upright.height / 2)
+      ctx.rotate(Math.PI / 2)
+      ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2)
+      uprightBoxes = boxes.map((b) => turnedBox(b, canvas.height))
+    }
+    const flipped = await upsideDown(m, upright, uprightBoxes)
+    return ((sideways ? 1 : 0) + (flipped ? 2 : 0)) % 4
+  } finally {
+    discardCanvas(small)
+  }
+}
+
+/** One read of the photo with PaddleOCR. `progress` is called with 0 to 1 as the text boxes are read. */
+export async function readPaddle(file: Blob, progress: (p: number) => void = () => undefined): Promise<{ lines: OcrLine[]; turns: number }> {
+  const m = await getModels()
+  // A photo that cannot be checked for orientation is read as it is.
+  const turns = await findTurns(file).catch(() => 0)
+  progress(0.1)
+  const canvas = await prepareImage(file, 'stretch', true, turns)
+  try {
     const { boxes } = await detect(m, canvas)
     progress(0.2)
     const items = []
@@ -213,7 +288,7 @@ export async function readPaddle(file: Blob, progress: (p: number) => void = () 
       items.push({ ...(await recognise(m, canvas, box)), box })
       progress(0.2 + (0.8 * (i + 1)) / boxes.length)
     }
-    return toLines(items)
+    return { lines: toLines(items), turns }
   } finally {
     discardCanvas(canvas)
   }
@@ -227,5 +302,6 @@ export async function disposePaddle() {
     const m = await p.catch(() => null)
     await m?.det.release().catch(() => undefined)
     await m?.rec.release().catch(() => undefined)
+    await m?.cls?.release().catch(() => undefined)
   }
 }

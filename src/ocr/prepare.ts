@@ -7,17 +7,24 @@ import { boxBlur } from './pixels'
 const TARGET_LONG_SIDE = 1600
 const MAX_UPSCALE = 3
 
-export async function prepareImage(file: Blob, mode: PrepMode = 'stretch', level = true): Promise<HTMLCanvasElement> {
+/** `turns` is how many quarter turns clockwise to rotate the photo first (a card held sideways or upside down). */
+export async function prepareImage(file: Blob, mode: PrepMode = 'stretch', level = true, turns = 0): Promise<HTMLCanvasElement> {
   const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
   try {
     const scale = Math.min(MAX_UPSCALE, TARGET_LONG_SIDE / Math.max(bitmap.width, bitmap.height))
     const canvas = document.createElement('canvas')
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale))
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+    const w = Math.max(1, Math.round(bitmap.width * scale))
+    const h = Math.max(1, Math.round(bitmap.height * scale))
+    const sideways = turns % 2 !== 0
+    canvas.width = sideways ? h : w
+    canvas.height = sideways ? w : h
     const ctx = canvas.getContext('2d', { willReadFrequently: true })
     if (!ctx) throw new Error('canvas unavailable')
     ctx.imageSmoothingQuality = 'high'
-    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    ctx.translate(canvas.width / 2, canvas.height / 2)
+    ctx.rotate((turns * Math.PI) / 2)
+    ctx.drawImage(bitmap, -w / 2, -h / 2, w, h)
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
     const tilt = cleanUp(ctx, canvas.width, canvas.height, mode, level)
     return Math.abs(tilt) >= MIN_TILT ? turnLevel(canvas, tilt) : canvas
   } finally {

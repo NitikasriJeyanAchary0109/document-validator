@@ -28,14 +28,6 @@ export function App() {
   const report = useMemo(() => (service ? checkDocuments({ service, dob, asOf, answers, docs }) : null), [service, dob, asOf, answers, docs])
 
   const added = useMemo(() => new Set(docs.map((d) => d.type)), [docs])
-  const addable = useMemo<DocTypeId[]>(() => {
-    if (!service || !report) return []
-    const applicable = new Set(report.checklist.map((c) => c.id))
-    const types = new Set<DocTypeId>()
-    for (const r of service.requirements) if (applicable.has(r.id)) for (const a of r.anyOf) types.add(a.doc)
-    return [...types].filter((t) => DOCS[t].fields.length > 0 || !added.has(t))
-  }, [service, report, added])
-
   // Scroll to the result the first time it is shown.
   useEffect(() => {
     if (checked) resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -113,45 +105,31 @@ export function App() {
       </header>
 
       <main className="wrap" id="main">
-        {!service && (
-          <>
-            <div className="hero">
-              <h1>Check your papers before the appointment</h1>
-              <p>For RTO, passport and Aadhaar visits. Tell us what you are going in for, enter what your documents say, and we flag what commonly causes problems at the counter.</p>
-            </div>
-            <ServicePicker onPick={pickService} />
-          </>
-        )}
+        {!service && <ServicePicker onPick={pickService} />}
 
         {service && report && (
           <>
-            <nav className="crumbs" aria-label="Progress">
-              <button type="button" className="link-btn" onClick={() => { setServiceId(null); setChecked(false) }}>
-                ← All services
-              </button>
+            <nav className="crumbs" aria-label="Back">
               <button type="button" className="link-btn" onClick={startOver}>
-                Start over
+                ← All services
               </button>
             </nav>
             <h1 className="service-h">{service.title}</h1>
+            {service.status === 'provisional' && <p className="hint">Some of these rules are still being verified.</p>}
 
-            <Basics service={service} dob={dob} asOf={asOf} answers={answers} onDob={setDob} onAsOf={setAsOf} onAnswer={(id, v) => setAnswers((a) => ({ ...a, [id]: v }))} />
+            <Basics service={service} dob={dob} asOf={asOf} todayIso={toIso(today())} answers={answers} onDob={setDob} onAsOf={setAsOf} onAnswer={(id, v) => setAnswers((a) => ({ ...a, [id]: v }))} />
             <Checklist service={service} items={report.checklist} added={added} onAdd={addDoc} />
-            <DocCards docs={docs} addable={addable} onAdd={addDoc} onRemove={(id) => setDocs((ds) => ds.filter((d) => d.id !== id))} onField={setField} onScan={scanDoc} scans={scans} />
+            <DocCards docs={docs} onRemove={(id) => setDocs((ds) => ds.filter((d) => d.id !== id))} onField={setField} onScan={scanDoc} scans={scans} />
 
             <div ref={resultRef} className="result-anchor">
               {checked ? (
                 <Result service={service} report={report} />
               ) : (
                 <div className="cta">
-                  <p>
-                    {missingBlockers > 0
-                      ? `${missingBlockers} required item${missingBlockers === 1 ? '' : 's'} still not covered. You can check anyway.`
-                      : 'Ready when you are.'}
-                  </p>
                   <button type="button" className="btn btn-primary" onClick={() => setChecked(true)}>
                     Check my documents
                   </button>
+                  {missingBlockers > 0 && <p className="hint">{missingBlockers} still to add. You can check anyway.</p>}
                 </div>
               )}
             </div>
@@ -160,10 +138,7 @@ export function App() {
       </main>
 
       <footer className="foot wrap">
-        <p>
-          An unofficial pre-check, not affiliated with any government department. It checks what you type against published rules, which change and differ by state and office. The officer at the counter makes the decision. Nothing is uploaded,
-          stored or logged.
-        </p>
+        <p>An unofficial pre-check, not affiliated with any government department. The office makes the decision.</p>
       </footer>
     </>
   )
